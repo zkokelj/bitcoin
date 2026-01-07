@@ -40,16 +40,20 @@ struct ScriptTypeBlockStats {
 class ScriptTypeIndex final : public BaseIndex
 {
 private:
-    /** Database key prefix set to 's' */
-    static constexpr uint8_t DB_SCRIPT_TYPE_STATS{'s'};
-
     std::unique_ptr<BaseIndex::DB> m_db;
+
+    // Cumulative statistics
+    std::array<uint64_t, ScriptTypeBlockStats::TXOUT_TYPE_COUNT> m_cumulative_output_counts{};
+    std::array<CAmount, ScriptTypeBlockStats::TXOUT_TYPE_COUNT> m_cumulative_output_values{};
+
+    uint256 m_current_block_hash{};
 
     ScriptTypeBlockStats ComputeStats(const CBlock& block) const;
 
 protected:
     bool CustomAppend(const interfaces::BlockInfo& block) override;
     bool CustomRemove(const interfaces::BlockInfo& block) override;
+    bool CustomInit(const std::optional<interfaces::BlockRef>& block) override;
     bool AllowPrune() const override { return false; }
     BaseIndex::DB& GetDB() const override { return *m_db; }
 
@@ -58,6 +62,7 @@ public:
     ~ScriptTypeIndex() override;
 
     bool LookupStats(const uint256& block_hash, ScriptTypeBlockStats& stats) const;
+    bool LookupStatsByHeight(int height, ScriptTypeBlockStats& stats) const;
 };
 
 extern std::unique_ptr<ScriptTypeIndex> g_script_type_index;

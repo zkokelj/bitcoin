@@ -3465,65 +3465,80 @@ return RPCHelpMan{
     };
 }
 
+namespace {
+// Mode constants for getscripttypestats
+constexpr const char* MODE_BLOCK = "block";
+constexpr const char* MODE_CUMULATIVE = "cumulative";
+constexpr const char* MODE_RANGE = "range";
+} // namespace
+
 static RPCHelpMan getscripttypestats()
 {
     return RPCHelpMan{"getscripttypestats",
-        "\nReturns script type statistics for a block.\n",
+        "\nReturns script type statistics for outputs.\n"
+        "\nBy default returns stats for a single block. Use 'cumulative' mode for totals from genesis,\n"
+        "or provide a start block hash for range statistics.\n",
         {
-            {"blockhash", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The block hash"},
+            {"blockhash", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, 
+                "The block hash (or end block for range queries)"},
+            {"mode_or_start", RPCArg::Type::STR, RPCArg::Optional::OMITTED,
+                "Either 'cumulative' for cumulative stats, or a block hash to get range stats from that block to blockhash"},
         },
         RPCResult{
             RPCResult::Type::OBJ, "", "",
             {
+                {RPCResult::Type::STR, "mode", "Query mode: 'block', 'cumulative', or 'range'"},
                 {RPCResult::Type::OBJ, "nonstandard", "Non-standard outputs",
                 {
                     {RPCResult::Type::NUM, "count", "Number of outputs"},
-                    {RPCResult::Type::NUM, "value", "Total satoshis locked"},
+                    {RPCResult::Type::STR_AMOUNT, "value", "Total value in BTC"},
                 }},
                 {RPCResult::Type::OBJ, "p2pk", "Pay-to-pubkey outputs",
                 {
                     {RPCResult::Type::NUM, "count", "Number of outputs"},
-                    {RPCResult::Type::NUM, "value", "Total satoshis locked"},
+                    {RPCResult::Type::STR_AMOUNT, "value", "Total value in BTC"},
                 }},
                 {RPCResult::Type::OBJ, "p2pkh", "Pay-to-pubkey-hash outputs",
                 {
                     {RPCResult::Type::NUM, "count", "Number of outputs"},
-                    {RPCResult::Type::NUM, "value", "Total satoshis locked"},
+                    {RPCResult::Type::STR_AMOUNT, "value", "Total value in BTC"},
                 }},
                 {RPCResult::Type::OBJ, "p2sh", "Pay-to-script-hash outputs",
                 {
                     {RPCResult::Type::NUM, "count", "Number of outputs"},
-                    {RPCResult::Type::NUM, "value", "Total satoshis locked"},
+                    {RPCResult::Type::STR_AMOUNT, "value", "Total value in BTC"},
                 }},
-                {RPCResult::Type::OBJ, "multisig", "Multisig outputs",
+                {RPCResult::Type::OBJ, "multisig", "Bare multisig outputs",
                 {
                     {RPCResult::Type::NUM, "count", "Number of outputs"},
-                    {RPCResult::Type::NUM, "value", "Total satoshis locked"},
+                    {RPCResult::Type::STR_AMOUNT, "value", "Total value in BTC"},
                 }},
-                {RPCResult::Type::OBJ, "nulldata", "Null data (OP_RETURN) outputs",
+                {RPCResult::Type::OBJ, "nulldata", "OP_RETURN outputs",
                 {
                     {RPCResult::Type::NUM, "count", "Number of outputs"},
-                    {RPCResult::Type::NUM, "value", "Total satoshis locked"},
+                    {RPCResult::Type::STR_AMOUNT, "value", "Total value in BTC"},
                 }},
                 {RPCResult::Type::OBJ, "p2wpkh", "Pay-to-witness-pubkey-hash outputs",
                 {
                     {RPCResult::Type::NUM, "count", "Number of outputs"},
-                    {RPCResult::Type::NUM, "value", "Total satoshis locked"},
+                    {RPCResult::Type::STR_AMOUNT, "value", "Total value in BTC"},
                 }},
                 {RPCResult::Type::OBJ, "p2wsh", "Pay-to-witness-script-hash outputs",
                 {
                     {RPCResult::Type::NUM, "count", "Number of outputs"},
-                    {RPCResult::Type::NUM, "value", "Total satoshis locked"},
+                    {RPCResult::Type::STR_AMOUNT, "value", "Total value in BTC"},
                 }},
                 {RPCResult::Type::OBJ, "p2tr", "Pay-to-taproot outputs",
                 {
                     {RPCResult::Type::NUM, "count", "Number of outputs"},
-                    {RPCResult::Type::NUM, "value", "Total satoshis locked"},
+                    {RPCResult::Type::STR_AMOUNT, "value", "Total value in BTC"},
                 }},
             }
         },
         RPCExamples{
-            HelpExampleCli("getscripttypestats", "\"0x000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f\"")
+            HelpExampleCli("getscripttypestats", "\"00000000000000000001a2b3...\"") +
+            HelpExampleCli("getscripttypestats", "\"00000000000000000001a2b3...\" \"cumulative\"") +
+            HelpExampleCli("getscripttypestats", "\"<end_hash>\" \"<start_hash>\"")
         },
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
         {
@@ -3531,32 +3546,135 @@ static RPCHelpMan getscripttypestats()
                 throw JSONRPCError(RPC_MISC_ERROR, "Script type index is not enabled. Start with -scripttypeindex.");
             }
 
-            uint256 hash = ParseHashV(request.params[0], "blockhash");
-
+            uint256 block_hash = ParseHashV(request.params[0], "blockhash");
+            
             ScriptTypeBlockStats stats;
-            if (!g_script_type_index->LookupStats(hash, stats)) {
-                throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Block not found in script type index");
+            std::string mode = MODE_BLOCK;
+
+            if (request.params[1].isNull()) {
+                // Per-block stats: cumulative(block) - cumulative(prev_block)
+                mode = MODE_BLOCK;
+                
+                ScriptTypeBlockStats cumulative;
+                if (!g_script_type_index->LookupStats(block_hash, cumulative)) {
+                    throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Block not found in script type index");
+                }
+
+                // Get previous block's cumulative stats
+                ChainstateManager& chainman = EnsureAnyChainman(request.context);
+                const CBlockIndex* pindex;
+                {
+                    LOCK(cs_main);
+                    pindex = chainman.m_blockman.LookupBlockIndex(block_hash);
+                    if (!pindex) {
+                        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Block not found");
+                    }
+                }
+
+                if (pindex->pprev) {
+                    ScriptTypeBlockStats prev_cumulative;
+                    if (g_script_type_index->LookupStats(pindex->pprev->GetBlockHash(), prev_cumulative)) {
+                        // Subtract previous cumulative to get per-block
+                        for (size_t i = 0; i < ScriptTypeBlockStats::TXOUT_TYPE_COUNT; ++i) {
+                            stats.output_counts[i] = cumulative.output_counts[i] - prev_cumulative.output_counts[i];
+                            stats.output_values[i] = cumulative.output_values[i] - prev_cumulative.output_values[i];
+                        }
+                    } else {
+                        stats = cumulative; // Genesis or prev not indexed yet
+                    }
+                } else {
+                    stats = cumulative; // Genesis block
+                }
+
+            } else {
+                // we have a second parameter (so it can either be "cumulative" or a block hash - for range queries)
+                std::string param2 = request.params[1].get_str();
+                
+                if (param2 == MODE_CUMULATIVE) {
+                    // Cumulative stats
+                    mode = MODE_CUMULATIVE;
+                    if (!g_script_type_index->LookupStats(block_hash, stats)) {
+                        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Block not found in script type index");
+                    }
+
+                } else {
+                    // Range query: param2 is start_blockhash
+                    mode = MODE_RANGE;
+                    uint256 start_hash = ParseHashV(request.params[1], "start_blockhash");
+
+                    ScriptTypeBlockStats end_cumulative;
+                    if (!g_script_type_index->LookupStats(block_hash, end_cumulative)) {
+                        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "End block not found in script type index");
+                    }
+
+                    // Get the block before start to make range inclusive
+                    ChainstateManager& chainman = EnsureAnyChainman(request.context);
+                    const CBlockIndex* start_pindex;
+                    const CBlockIndex* end_pindex;
+                    {
+                        LOCK(cs_main);
+                        CChain& active_chain = chainman.ActiveChain();
+                        start_pindex = chainman.m_blockman.LookupBlockIndex(start_hash);
+                        if (!start_pindex) {
+                            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Start block not found");
+                        }
+                        end_pindex = chainman.m_blockman.LookupBlockIndex(block_hash);
+                        if (!end_pindex) {
+                            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "End block not found");
+                        }
+
+                        // Validate blocks are on the active chain
+                        if (!active_chain.Contains(start_pindex)) {
+                            throw JSONRPCError(RPC_INVALID_PARAMETER, "Start block is not in main chain");
+                        }
+                        if (!active_chain.Contains(end_pindex)) {
+                            throw JSONRPCError(RPC_INVALID_PARAMETER, "End block is not in main chain");
+                        }
+
+                        // Validate ordering
+                        if (end_pindex->nHeight < start_pindex->nHeight) {
+                            throw JSONRPCError(RPC_INVALID_PARAMETER,
+                                strprintf("End block height (%d) must be >= start block height (%d)",
+                                         end_pindex->nHeight, start_pindex->nHeight));
+                        }
+                    }
+
+                    if (start_pindex->pprev) {
+                        ScriptTypeBlockStats before_start_cumulative;
+                        if (g_script_type_index->LookupStats(start_pindex->pprev->GetBlockHash(), before_start_cumulative)) {
+                            for (size_t i = 0; i < ScriptTypeBlockStats::TXOUT_TYPE_COUNT; ++i) {
+                                stats.output_counts[i] = end_cumulative.output_counts[i] - before_start_cumulative.output_counts[i];
+                                stats.output_values[i] = end_cumulative.output_values[i] - before_start_cumulative.output_values[i];
+                            }
+                        } else {
+                            stats = end_cumulative;
+                        }
+                    } else {
+                        stats = end_cumulative; // Start is genesis
+                    }
+                }
             }
 
+            // Build result
             UniValue result(UniValue::VOBJ);
+            result.pushKV("mode", mode);
 
-            // Helper lambda to create nested object for each script type
             auto addScriptType = [&result](const std::string& name, uint64_t count, CAmount value) {
                 UniValue obj(UniValue::VOBJ);
                 obj.pushKV("count", count);
-                obj.pushKV("value", value);
+                obj.pushKV("value", ValueFromAmount(value));
                 result.pushKV(name, obj);
             };
 
-            addScriptType("nonstandard", stats.output_counts[0], stats.output_values[0]);
-            addScriptType("p2pk", stats.output_counts[1], stats.output_values[1]);
-            addScriptType("p2pkh", stats.output_counts[2], stats.output_values[2]);
-            addScriptType("p2sh", stats.output_counts[3], stats.output_values[3]);
-            addScriptType("multisig", stats.output_counts[4], stats.output_values[4]);
-            addScriptType("nulldata", stats.output_counts[5], stats.output_values[5]);
-            addScriptType("p2wpkh", stats.output_counts[6], stats.output_values[6]);
-            addScriptType("p2wsh", stats.output_counts[7], stats.output_values[7]);
-            addScriptType("p2tr", stats.output_counts[8], stats.output_values[8]);
+            addScriptType("nonstandard", stats.output_counts[static_cast<size_t>(TxoutType::NONSTANDARD)], stats.output_values[static_cast<size_t>(TxoutType::NONSTANDARD)]);
+            addScriptType("p2pk", stats.output_counts[static_cast<size_t>(TxoutType::PUBKEY)], stats.output_values[static_cast<size_t>(TxoutType::PUBKEY)]);
+            addScriptType("p2pkh", stats.output_counts[static_cast<size_t>(TxoutType::PUBKEYHASH)], stats.output_values[static_cast<size_t>(TxoutType::PUBKEYHASH)]);
+            addScriptType("p2sh", stats.output_counts[static_cast<size_t>(TxoutType::SCRIPTHASH)], stats.output_values[static_cast<size_t>(TxoutType::SCRIPTHASH)]);
+            addScriptType("multisig", stats.output_counts[static_cast<size_t>(TxoutType::MULTISIG)], stats.output_values[static_cast<size_t>(TxoutType::MULTISIG)]);
+            addScriptType("nulldata", stats.output_counts[static_cast<size_t>(TxoutType::NULL_DATA)], stats.output_values[static_cast<size_t>(TxoutType::NULL_DATA)]);
+            addScriptType("p2wpkh", stats.output_counts[static_cast<size_t>(TxoutType::WITNESS_V0_KEYHASH)], stats.output_values[static_cast<size_t>(TxoutType::WITNESS_V0_KEYHASH)]);
+            addScriptType("p2wsh", stats.output_counts[static_cast<size_t>(TxoutType::WITNESS_V0_SCRIPTHASH)], stats.output_values[static_cast<size_t>(TxoutType::WITNESS_V0_SCRIPTHASH)]);
+            addScriptType("p2tr", stats.output_counts[static_cast<size_t>(TxoutType::WITNESS_V1_TAPROOT)], stats.output_values[static_cast<size_t>(TxoutType::WITNESS_V1_TAPROOT)]);
 
             return result;
         },
