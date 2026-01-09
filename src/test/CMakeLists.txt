@@ -33,6 +33,7 @@ add_executable(test_bitcoin
   coins_tests.cpp
   coinscachepair_tests.cpp
   coinstatsindex_tests.cpp
+  scripttypeindex_tests.cpp
   common_url_tests.cpp
   compress_tests.cpp
   crypto_tests.cpp
@@ -119,6 +120,7 @@ add_executable(test_bitcoin
   txvalidationcache_tests.cpp
   uint256_tests.cpp
   util_check_tests.cpp
+  util_expected_tests.cpp
   util_string_tests.cpp
   util_tests.cpp
   util_threadnames_tests.cpp
